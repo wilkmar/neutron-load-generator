@@ -1,0 +1,12 @@
+# clouds.yaml template
+# modify according to your environment
+clouds:
+ stsstack:
+   region_name: RegionOne
+   auth:
+     username: 'admin'
+     user_domain_name: 'admin_domain'
+     password: openstack
+     project_name: 'admin'
+     project_domain_name: 'admin_domain'
+     auth_url: 'http://1.2.3.4:5000/v3'
