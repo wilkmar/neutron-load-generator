@@ -9,4 +9,4 @@ clouds:
      password: openstack
      project_name: 'admin'
      project_domain_name: 'admin_domain'
-     auth_url: 'http://1.2.3.4:5000/v3'
+     auth_url: 'http://10.5.2.100:5000/v3'

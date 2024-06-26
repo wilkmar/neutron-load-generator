@@ -6,12 +6,11 @@ import threading
 import time
 import uuid
 import ipaddress
+import random
+import argparse
 
-f_quota = True
-no_routers = 20
-no_networks_per_router = 10
-no_cycles = 10
-cleanup_only = True
+DEFAULT_PREFIX = 'nlg-'
+DEFAULT_CIDR = '172.16.0.0/14'
 
 
 def execution_time(func):
@@ -26,71 +25,92 @@ def execution_time(func):
     return inner1
 
 
-class Nlg:
-
-    default_prefix = 'nlg-'
-    default_cidr = '172.16.0.0/14'
-
-    def __init__(self, debug=False, force_quota=False):
-        logging.info(f'Debug set to: {debug}')
-        openstack.enable_logging(debug=debug)
-        self.force_quota = force_quota
-        self.conn = openstack.connect()
+class NlgProject:
+    def __init__(self, project_id=None, project=None):
+        self.quota = None
+        self.project_id = project_id
+        self.project = project
         self.networks = []
         self.subnets = []
         self.routers = []
-        self.refresh_resources()
-        auth = self.conn.config.config['auth']
-        self.domain = self.conn.get_domain(
-            name_or_id=auth['project_domain_name'])
-        self.project = self.conn.identity.find_project(
-            auth['project_name'],
-            domain_id=self.domain.id)
-        self.quota = self.conn.get_network_quotas(self.project.id)
-        logging.debug(f'{self.quota}')
-        if force_quota:
-            self.set_quota()
         self.cidrs = self.get_cidrs()
 
-    @staticmethod
-    def get_uuid():
-        return str(uuid.uuid4())[:8:]
+    def get_networks(self):
+        return self.networks
+
+    def get_subnets(self):
+        return self.subnets
+
+    def get_routers(self):
+        return self.routers
+
+    def get_quota(self):
+        return self.quota
+
+    def set_quota(self, quota):
+        self.quota = quota
 
     @staticmethod
     def get_cidrs():
         l_cidrs = []
-        _ns = list(ipaddress.ip_network(Nlg.default_cidr).
+        _ns = list(ipaddress.ip_network(DEFAULT_CIDR).
                    subnets(new_prefix=24))
         for ipv4net in _ns:
             l_cidrs.append(str(ipv4net))
         return set(l_cidrs)
 
-    def refresh_resources(self):
-        self.networks = self.list_resources('network')
-        self.subnets = self.list_resources('subnet')
-        self.routers = self.list_resources('router')
-        logging.debug(f'Networks: {self.networks}')
-        logging.debug(f'Subnets: {self.subnets}')
-        logging.debug(f'Routers: {self.routers}')
+
+class Nlg:
+    def __init__(self, domain_id, ext_net_id, cleanup=True, force_quota=True,
+                 debug=False):
+        logging.info(f'Debug set to: {debug}')
+        openstack.enable_logging(debug=debug)
+        self.force_cleanup = cleanup
+        self.force_quota = force_quota
+        self.target_domain_id = domain_id
+        self.external_network_id = ext_net_id
+        self.conn = openstack.connect()
+        self.projects = []
+        self.print_resource_counts()
+
+    @staticmethod
+    def get_uuid():
+        return str(uuid.uuid4())[:8:]
 
     @execution_time
-    def list_resources(self, resource, name_prefix=default_prefix):
-        _result = []
-        if resource == 'network':
-            resources = self.conn.network.networks()
-        elif resource == 'subnet':
-            resources = self.conn.network.subnets()
-        elif resource == 'router':
-            resources = self.conn.network.routers()
-        else:
-            resources = []
+    def list_resources(self, name_prefix=DEFAULT_PREFIX):
+        all_projects = self.conn.identity.projects(
+            domain_id=self.target_domain_id)
 
-        for resource in resources:
-            if name_prefix and name_prefix in resource['name']:
-                _result.append(resource)
-        return _result
+        for project in all_projects:
+            logging.debug(f'Project: {project.name}, ID: {project.id}')
+            if name_prefix in project.name:
+                nlgproject = NlgProject(project_id=project.id)
+                networks = self.conn.network.networks(project_id=project.id)
+                logging.debug(f'Networks: {networks}')
+                nlgproject.get_networks().extend(networks)
+                subnets = self.conn.network.subnets(project_id=project.id)
+                logging.debug(f'Subnets: {subnets}')
+                nlgproject.get_subnets().extend(subnets)
+                routers = self.conn.network.routers(project_id=project.id)
+                logging.debug(f'Routers: {routers}')
+                nlgproject.get_routers().extend(routers)
+                quota = self.conn.get_network_quotas(project.id)
+                nlgproject.set_quota(quota)
+                self.projects.append(nlgproject)
 
-    def set_quota(self, quota=None):
+    def print_resource_counts(self):
+        self.projects = []
+        self.list_resources()
+        logging.info("All projects: %s", len(self.projects))
+        for project in self.projects:
+            logging.info("############################################")
+            logging.info(f"Project ID: {project.project_id}")
+            logging.info("Routers: %s", len(project.get_routers()))
+            logging.info("Networks: %s", len(project.get_networks()))
+            logging.info("Subnets: %s", len(project.get_subnets()))
+
+    def set_quota(self, project_id, quota=None):
         _q = dict()
         if quota:
             _q['networks'] = quota.networks
@@ -103,59 +123,79 @@ class Nlg:
             _q['routers'] = -1
             _q['ports'] = -1
         logging.info(f'Setting quota: {_q}')
-        self.conn.set_network_quotas(self.project.id, **_q)
+        self.conn.set_network_quotas(project_id, **_q)
 
-    def cleanup(self):
-        logging.info('Deleting resources')
+    def cleanup(self, uid, project):
+        logging.info(f' T-{uid} deleting resources')
         try:
-            for router in self.routers:
+            for router in project.get_routers():
                 ports = self.conn.list_router_interfaces(router)
                 for port in ports:
-                    self.conn.remove_router_interface(router, port_id=port.id)
+                    if port.device_owner != "network:router_gateway":
+                        self.conn.remove_router_interface(router,
+                                                          port_id=port.id)
                 self._delete_router(router.id)
-            for subnet in self.subnets:
+            for subnet in project.get_subnets():
                 _cidr = subnet['cidr']
                 self._delete_subnet(subnet.name)
-                self.cidrs.add(_cidr)
-            for network in self.networks:
+                project.cidrs.add(_cidr)
+            for network in project.get_networks():
                 self._delete_network(network.name)
+            self._delete_project(project.project_id)
 
-            self.set_quota(quota=self.quota)
         except OpenStackCloudException as err:
             logging.error(f'Cleanup failed: {err}')
 
     def gen_load(self, uid, networks_per_router=5):
         logging.info(f' T-{uid} creating resources')
-        router = self._create_router(uid)
-        self.create_networks(uid, networks_per_router, router)
+        project_name = DEFAULT_PREFIX + uid
+        nlgproject = self._create_project(project_name)
+        self._create_router(uid, nlgproject)
+        self.create_networks(uid, networks_per_router, nlgproject)
 
-    def create_networks(self, uid, count, router):
+    def create_networks(self, uid, count, nlgproject):
         for _ in range(count):
-            network_name = self.default_prefix + uid + '-' + self.get_uuid()
-            self._create_network(network_name)
-            _s = self._create_subnet(network_name)
+            network_name = DEFAULT_PREFIX + uid + '-' + self.get_uuid()
+            self._create_network(network_name, nlgproject)
+            _s = self._create_subnet(network_name, nlgproject)
+            # currently we only support a single router per tenant
+            router = nlgproject.get_routers()[0]
             self.conn.add_router_interface(router, _s.id)
 
     @execution_time
-    def _create_router(self, uid):
-        router_name = self.default_prefix + uid
-        _r = self.conn.create_router(name=router_name)
-        self.routers.append(_r)
+    def _create_router(self, uid, nlgproject):
+        router_name = DEFAULT_PREFIX + uid
+        _r = self.conn.create_router(name=router_name,
+                                     project_id=nlgproject.project.id,
+                                     ext_gateway_net_id=self.external_network_id)
+        nlgproject.get_routers().append(_r)
         return _r
 
     @execution_time
-    def _create_network(self, network_name):
-        _n = self.conn.create_network(name=network_name)
-        self.networks.append(_n)
+    def _create_network(self, network_name, nlgproject):
+        _n = self.conn.create_network(name=network_name,
+                                      project_id=nlgproject.project.id)
+        nlgproject.get_networks().append(_n)
         return _n
 
     @execution_time
-    def _create_subnet(self, subnet_name):
+    def _create_subnet(self, subnet_name, nlgproject):
         _s = self.conn.create_subnet(name=subnet_name,
                                      network_name_or_id=subnet_name,
-                                     cidr=self.cidrs.pop())
-        self.subnets.append(_s)
+                                     cidr=nlgproject.cidrs.pop(),
+                                     project_id=nlgproject.project.id)
+        nlgproject.get_subnets().append(_s)
         return _s
+
+    @execution_time
+    def _create_project(self, project_name):
+        _pr = self.conn.create_project(name=project_name,
+                                       domain_id=self.target_domain_id)
+        nlg_project = NlgProject(project_id=_pr.id, project=_pr)
+        self.projects.append(nlg_project)
+        if self.force_quota:
+            self.set_quota(nlg_project.project.id)
+        return nlg_project
 
     @execution_time
     def _delete_router(self, router_id):
@@ -169,20 +209,45 @@ class Nlg:
     def _delete_subnet(self, subnet_name):
         self.conn.delete_subnet(subnet_name)
 
+    @execution_time
+    def _delete_project(self, project_id):
+        self.conn.delete_project(project_id, domain_id=self.target_domain_id)
 
-class LoadRunner(threading.Thread):
 
-    def __init__(self, unique_id, nlg_object):
+class CreationRunner(threading.Thread):
+
+    def __init__(self, unique_id, nlg_object, max_networks):
+        threading.Thread.__init__(self)
+        self.name = 'T-' + unique_id
+        self.uid = unique_id
+        self.nlg = nlg_object
+        self.max_networks = max_networks
+        self.creation_time = time.time()
+
+    @execution_time
+    def run(self):
+        _number_of_networks = random.randint(2, self.max_networks)
+        logging.info(f'Thread {self.name} started. No of networks: '
+                     f'{_number_of_networks}')
+        self.nlg.gen_load(self.uid, networks_per_router=_number_of_networks)
+
+
+class CleanupRunner(threading.Thread):
+
+    def __init__(self, unique_id, nlg_object, project):
         threading.Thread.__init__(self)
         self.name = 'T-' + unique_id
         self.uid = unique_id
         self.nlg = nlg_object
         self.creation_time = time.time()
+        self.project = project
 
     @execution_time
     def run(self):
-        logging.info(f'Thread {self.name} started.')
-        self.nlg.gen_load(self.uid, networks_per_router=no_networks_per_router)
+        logging.info(f'Thread {self.name} started. Cleanup of project: '
+                     f'{self.project.project_id}')
+
+        self.nlg.cleanup(self.uid, self.project)
 
 
 logging.basicConfig(
@@ -197,20 +262,107 @@ logging.basicConfig(
 
 @execution_time
 def main():
-    try:
-        threads = []
-        nlg = Nlg(force_quota=f_quota)
-        if not cleanup_only:
-            for _ in range(no_routers):
-                router_id = Nlg.get_uuid()
-                threads.append(LoadRunner(f'{router_id}', nlg))
+    parser = argparse.ArgumentParser(
+        description="This script generates "
+                    "load/creates resources on the OpenStack cloud. "
+                    "It creates projects, next networks and subnets in those "
+                    "projects and finally a router per project."
+                    "It attaches each project's subnet to the corresponding"
+                    "router.")
+    parser.add_argument("domain_id", metavar="domain-id",
+                        help="Target domain id where all the "
+                             "projects are created.",
+                        type=str)
+    parser.add_argument("ext_net_id", metavar="ext-net-id",
+                        help="External network id to attach "
+                             "to each router.",
+                        type=str)
+    parser.add_argument("-p", "--projects",
+                        help="Number of projects to create. Default 5.",
+                        type=int, default=5)
+    parser.add_argument("-n", "--networks",
+                        help="Maximum number of networks per project. "
+                             "The actual number will be randomly generated "
+                             "from range between 2 and this value for each for"
+                             " the projects. Default 10.",
+                        type=int, default=10)
+    parser.add_argument("-t", "--threads",
+                        help="Number of threads to run when creating or "
+                             "deleting resources. Default 10.",
+                        type=int, default=10)
+    parser.add_argument("-c", "--create-resources",
+                        help="By default the script will run in the cleanup "
+                             "mode. It will not create any resources unless "
+                             "this flag is set. Default False.",
+                        action="store_true")
+    parser.add_argument("-q", "--force-quota",
+                        help="Set unlimited quota for the created projects. "
+                             "Default False.",
+                        action="store_true")
+    parser.add_argument("-d", "--debug",
+                        help="Enable debug logging. Default False.",
+                        action="store_true")
+    args = parser.parse_args()
+    domain_id = args.domain_id
+    ext_net_id = args.ext_net_id
+    f_cleanup = not args.create_resources
+    f_quota = args.force_quota
+    projects_count = args.projects
+    networks_count = args.networks
+    threads_count = args.threads
+    logging.info(f'Target domain id: {domain_id}')
+    logging.info(f'External network id: {ext_net_id}')
+    logging.info(f'Force cleanup set to: {f_cleanup}')
+    logging.info(f'Force quota set to: {f_quota}')
+    logging.info(f'Projects: {projects_count}')
+    logging.info(f'Networks: {networks_count}')
+    logging.info(f'Threads: {threads_count}')
+    nlg = Nlg(domain_id,
+              ext_net_id,
+              cleanup=f_cleanup,
+              force_quota=f_quota,
+              debug=args.debug)
+    threads = []
+    no_projects = len(nlg.projects)
+    if f_cleanup:
+        if no_projects == 0:
+            logging.info("No projects found, nothing to clean up.")
+        else:
+            logging.info("Performing cleanup only...")
+            idx = 0
+            while idx < no_projects:
+                _thread_count = min(threads_count, no_projects - idx)
+                for _ in range(_thread_count):
+                    uid = Nlg.get_uuid()
+                    threads.append(CleanupRunner(f'{uid}',
+                                                 nlg,
+                                                 nlg.projects[idx]))
+                    idx += 1
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+    else:
+        if no_projects > 0:
+            logging.info("Some resources already exist. "
+                         "Are you sure that you want to proceed "
+                         "without cleaning them first? Type 'yes' if you "
+                         "want to proceed. Any other key to exit.")
+            ans = input()
+            if ans.lower() != "yes":
+                logging.info("Exiting...")
+                return
+        while len(nlg.projects) < projects_count:
+            _thread_count = min(threads_count,
+                                projects_count - len(nlg.projects))
+            for _ in range(_thread_count):
+                uid = Nlg.get_uuid()
+                threads.append(CreationRunner(f'{uid}', nlg, networks_count))
             for thread in threads:
                 thread.start()
             for thread in threads:
                 thread.join()
-    finally:
-        nlg.cleanup()
+    nlg.print_resource_counts()
 
 
 main()
-
