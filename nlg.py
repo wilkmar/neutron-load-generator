@@ -80,9 +80,10 @@ class Nlg:
     def list_resources(self, name_prefix=DEFAULT_PREFIX):
         all_projects = self.conn.identity.projects(
             domain_id=self.target_domain_id)
-
+        logging.info("Gathering info about existing resources. "
+                     "This may take some time.")
         for project in all_projects:
-            logging.debug(f'Project: {project.name}, ID: {project.id}')
+            logging.info(f'Project found: {project.name}, ID: {project.id}')
             if name_prefix in project.name:
                 nlgproject = NlgProject(project_id=project.id)
                 networks = self.conn.network.networks(project_id=project.id)
