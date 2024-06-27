@@ -6,7 +6,6 @@ import threading
 import time
 import uuid
 import ipaddress
-import random
 import argparse
 
 DEFAULT_PREFIX = 'nlg-'
@@ -216,31 +215,31 @@ class Nlg:
 
 class CreationRunner(threading.Thread):
 
-    def __init__(self, unique_id, nlg_object, max_networks):
+    def __init__(self, unique_id, nlg_object, **kwargs):
         threading.Thread.__init__(self)
         self.name = 'T-' + unique_id
         self.uid = unique_id
         self.nlg = nlg_object
-        self.max_networks = max_networks
+        self.max_networks = kwargs['max_networks']
         self.creation_time = time.time()
 
     @execution_time
     def run(self):
-        _number_of_networks = random.randint(2, self.max_networks)
         logging.info(f'Thread {self.name} started. No of networks: '
-                     f'{_number_of_networks}')
-        self.nlg.gen_load(self.uid, networks_per_router=_number_of_networks)
+                     f'{self.max_networks}')
+        self.nlg.gen_load(self.uid, networks_per_router=self.max_networks)
 
 
 class CleanupRunner(threading.Thread):
 
-    def __init__(self, unique_id, nlg_object, project):
+    def __init__(self, unique_id, nlg_object, **kwargs):
         threading.Thread.__init__(self)
         self.name = 'T-' + unique_id
         self.uid = unique_id
         self.nlg = nlg_object
         self.creation_time = time.time()
-        self.project = project
+        idx = kwargs['idx']
+        self.project = self.nlg.projects[idx]
 
     @execution_time
     def run(self):
@@ -258,6 +257,35 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
+
+
+def threads_control(threads_count,
+                    projects_count,
+                    runner_class,
+                    *runner_args,
+                    **runner_kwargs):
+    idx = 0
+    while idx < projects_count:
+        threads = []
+        _thread_count = min(threads_count,
+                            projects_count - idx)
+        for _ in range(_thread_count):
+            start_time = time.time()
+            uid = Nlg.get_uuid()
+            runner_obj = runner_class(f'{uid}',
+                                      *runner_args,
+                                      **runner_kwargs,
+                                      idx=idx)
+            threads.append(runner_obj)
+            idx += 1
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        finish_time = time.time()
+        logging.info(f'Batch of {_thread_count} threads completed in '
+                     f'{round(finish_time - start_time, 3)}s. '
+                     f'Total threads completed: {idx}')
 
 
 @execution_time
@@ -282,9 +310,7 @@ def main():
                         type=int, default=5)
     parser.add_argument("-n", "--networks",
                         help="Maximum number of networks per project. "
-                             "The actual number will be randomly generated "
-                             "from range between 2 and this value for each for"
-                             " the projects. Default 10.",
+                             "Default 10.",
                         type=int, default=10)
     parser.add_argument("-t", "--threads",
                         help="Number of threads to run when creating or "
@@ -322,26 +348,17 @@ def main():
               cleanup=f_cleanup,
               force_quota=f_quota,
               debug=args.debug)
-    threads = []
     no_projects = len(nlg.projects)
     if f_cleanup:
         if no_projects == 0:
             logging.info("No projects found, nothing to clean up.")
         else:
             logging.info("Performing cleanup only...")
-            idx = 0
-            while idx < no_projects:
-                _thread_count = min(threads_count, no_projects - idx)
-                for _ in range(_thread_count):
-                    uid = Nlg.get_uuid()
-                    threads.append(CleanupRunner(f'{uid}',
-                                                 nlg,
-                                                 nlg.projects[idx]))
-                    idx += 1
-                for thread in threads:
-                    thread.start()
-                for thread in threads:
-                    thread.join()
+            threads_control(
+                threads_count,
+                no_projects,
+                CleanupRunner,
+                nlg)
     else:
         if no_projects > 0:
             logging.info("Some resources already exist. "
@@ -352,16 +369,11 @@ def main():
             if ans.lower() != "yes":
                 logging.info("Exiting...")
                 return
-        while len(nlg.projects) < projects_count:
-            _thread_count = min(threads_count,
-                                projects_count - len(nlg.projects))
-            for _ in range(_thread_count):
-                uid = Nlg.get_uuid()
-                threads.append(CreationRunner(f'{uid}', nlg, networks_count))
-            for thread in threads:
-                thread.start()
-            for thread in threads:
-                thread.join()
+        threads_control(threads_count,
+                        projects_count,
+                        CreationRunner,
+                        nlg,
+                        max_networks=networks_count)
     nlg.print_resource_counts()
 
 
