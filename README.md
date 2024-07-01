@@ -4,7 +4,7 @@ Neutron Load Generator
 This python script can be used to:
 * Populate OpenStack with projects, networks, subnets and routers.
 * Generate excessive load on the Neutron API
-Before running change the *clouds.yaml* file to match your OpenStack env settings. Check the [openstackclient configuration](https://docs.openstack.org/python-openstackclient/latest/configuration/index.html) for details.
+Before running change the *clouds.yaml* file to match your OpenStack env settings. Check the [openstackclient configuration](https://docs.openstack.org/python-openstackclient/latest/configuration/index.html) for details. Provided *clouds.yaml* is just an example.
 
 ```commandline
 $ python nlg.py --help
