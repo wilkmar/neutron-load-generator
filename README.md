@@ -6,6 +6,8 @@ This python script can be used to:
 * Generate excessive load on the Neutron API
 Before running change the *clouds.yaml* file to match your OpenStack env settings. Check the [openstackclient configuration](https://docs.openstack.org/python-openstackclient/latest/configuration/index.html) for details. Provided *clouds.yaml* is just an example.
 
+By default, the tool produces the *nlg.log* file in the current directory.
+
 ```commandline
 $ python nlg.py --help
 usage: nlg.py [-h] [-p PROJECTS] [-n NETWORKS] [-t THREADS] [-c] [-q] [-d] domain-id ext-net-id
