@@ -9,7 +9,8 @@ import ipaddress
 import argparse
 
 DEFAULT_PREFIX = 'nlg-'
-DEFAULT_CIDR = '172.16.0.0/14'
+# 4096 subnets with 24 bit mask: 10.0.0.0/24-10.15.255.0/24
+DEFAULT_CIDR = '10.0.0.0/12'
 
 
 def execution_time(func):
@@ -183,6 +184,7 @@ class Nlg:
         _s = self.conn.create_subnet(name=subnet_name,
                                      network_name_or_id=subnet_name,
                                      cidr=nlgproject.cidrs.pop(),
+                                     enable_dhcp=True,
                                      project_id=nlgproject.project.id)
         nlgproject.get_subnets().append(_s)
         return _s
